@@ -40,12 +40,14 @@ void GlobalOptimization::GPS2XYZ(double latitude, double longitude, double altit
 void GlobalOptimization::inputOdom(double t, Eigen::Vector3d OdomP, Eigen::Quaterniond OdomQ)
 {
 	mPoseMap.lock();
+    // 把VIO的位姿直接存入localPoseMap, 以VIO数据的时间戳为key, 位姿数据为value
     vector<double> localPose{OdomP.x(), OdomP.y(), OdomP.z(), 
     					     OdomQ.w(), OdomQ.x(), OdomQ.y(), OdomQ.z()};
     localPoseMap[t] = localPose;
 
-
     Eigen::Quaterniond globalQ;
+    // 将VIO的位姿转换到GPS坐标系下,准确的说是转换到以第一帧GPS数据为原点的坐标系下
+    // 转换之后的位姿存入globalPoseMap
     globalQ = WGPS_T_WVIO.block<3, 3>(0, 0) * OdomQ;
     Eigen::Vector3d globalP = WGPS_T_WVIO.block<3, 3>(0, 0) * OdomP + WGPS_T_WVIO.block<3, 1>(0, 3);
     vector<double> globalPose{globalP.x(), globalP.y(), globalP.z(),
@@ -54,6 +56,7 @@ void GlobalOptimization::inputOdom(double t, Eigen::Vector3d OdomP, Eigen::Quate
     lastP = globalP;
     lastQ = globalQ;
 
+    // 将最新的全局位姿插入到轨迹中
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time(t);
     pose_stamped.header.frame_id = "world";
@@ -79,7 +82,10 @@ void GlobalOptimization::getGlobalOdom(Eigen::Vector3d &odomP, Eigen::Quaternion
 void GlobalOptimization::inputGPS(double t, double latitude, double longitude, double altitude, double posAccuracy)
 {
 	double xyz[3];
+    // 把经纬度转化到平面坐标系下
+    // 将第一帧GPS数据为世界坐标系的原点,而不是以0经纬度为原点
 	GPS2XYZ(latitude, longitude, altitude, xyz);
+    // 将计算出的平面坐标存入GPSPositionMap, 以GPS数据的时间戳为key, xyz坐标和GPS数据的方差为value
 	vector<double> tmp{xyz[0], xyz[1], xyz[2], posAccuracy};
     //printf("new gps: t: %f x: %f y: %f z:%f \n", t, tmp[0], tmp[1], tmp[2]);
 	GPSPositionMap[t] = tmp;
@@ -87,10 +93,18 @@ void GlobalOptimization::inputGPS(double t, double latitude, double longitude, d
 
 }
 
+/**
+ * *********************** 全局优化线程函数 ***********************
+ * 残差项包括VIO前后两帧之间的相对位姿约束和GPS位置约束
+ * 优化变量是每一帧的全局位姿, 以第一帧GPS数据为原点的坐标系下的位姿
+ * 构建的类在globalOpt.h中, 优化使用ceres求解器
+ */
+
 void GlobalOptimization::optimize()
 {
     while(true)
     {
+        // 每当有新的GPS数据输入时就进行一次优化
         if(newGPS)
         {
             newGPS = false;
@@ -133,7 +147,8 @@ void GlobalOptimization::optimize()
             int i = 0;
             for (iterVIO = localPoseMap.begin(); iterVIO != localPoseMap.end(); iterVIO++, i++)
             {
-                //vio factor
+                // vio factor
+                // 每两帧VIO数据之间构建一个相对位姿约束
                 iterVIONext = iterVIO;
                 iterVIONext++;
                 if(iterVIONext != localPoseMap.end())
@@ -216,6 +231,7 @@ void GlobalOptimization::optimize()
             //std::cout << summary.BriefReport() << "\n";
 
             // update global pose
+            // 优化结束后, 把优化得到的全局位姿更新到globalPoseMap中, 并更新轨迹
             //mPoseMap.lock();
             iter = globalPoseMap.begin();
             for (int i = 0; i < length; i++, iter++)

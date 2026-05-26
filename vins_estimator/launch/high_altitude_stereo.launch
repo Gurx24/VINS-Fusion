@@ -6,4 +6,3 @@
     <node name="loop_fusion" pkg="loop_fusion" type="loop_fusion_node" 
         output="screen" args="$(find vins)/../config/high_altitude/high_stereo_imu_config.yaml" />
 </launch>
-

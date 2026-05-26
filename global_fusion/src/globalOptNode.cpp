@@ -9,6 +9,11 @@
  * Author: Qin Tong (qintonguav@gmail.com)
  *******************************************************/
 
+// 传感器往往需要做时钟同步, 如果使用精度较低的GPS,那么同步则没有那么重要,因为GPS方差太大
+// 如果使用高精度RTK,则需要做好时钟同步, 否则优化结果会很差
+
+// 看到博客上说fusion默认发布频率为10Hz,而现在的gps可以达到20Hz,如果在这种系统上使用,可能还需要修改下VIO或者GPS频率
+
 #include "ros/ros.h"
 #include "globalOpt.h"
 #include <sensor_msgs/NavSatFix.h>
@@ -70,6 +75,7 @@ void publish_car_model(double t, Eigen::Vector3d t_w_car, Eigen::Quaterniond q_w
     pub_car.publish(markerArray_msg);
 }
 
+// GPS回调函数,接收GPS数据并存入队列
 void GPS_callback(const sensor_msgs::NavSatFixConstPtr &GPS_msg)
 {
     //printf("gps_callback! \n");
@@ -78,40 +84,48 @@ void GPS_callback(const sensor_msgs::NavSatFixConstPtr &GPS_msg)
     m_buf.unlock();
 }
 
+// VIO回调函数
 void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 {
     //printf("vio_callback! \n");
     double t = pose_msg->header.stamp.toSec();
     last_vio_t = t;
+
+    // 获取VIO里程计输出的位置和姿态
     Eigen::Vector3d vio_t(pose_msg->pose.pose.position.x, pose_msg->pose.pose.position.y, pose_msg->pose.pose.position.z);
     Eigen::Quaterniond vio_q;
     vio_q.w() = pose_msg->pose.pose.orientation.w;
     vio_q.x() = pose_msg->pose.pose.orientation.x;
     vio_q.y() = pose_msg->pose.pose.orientation.y;
     vio_q.z() = pose_msg->pose.pose.orientation.z;
+    // 位姿传入global estimator
     globalEstimator.inputOdom(t, vio_t, vio_q);
 
-
     m_buf.lock();
+    // 寻找与VIO时间戳相对应的GPS消息, 10ms同步容忍度
     while(!gpsQueue.empty())
     {
+        // 获取最老的GPS消息和时间戳
         sensor_msgs::NavSatFixConstPtr GPS_msg = gpsQueue.front();
         double gps_t = GPS_msg->header.stamp.toSec();
         printf("vio t: %f, gps t: %f \n", t, gps_t);
         // 10ms sync tolerance
         if(gps_t >= t - 0.01 && gps_t <= t + 0.01)
-        {
+        {   
+            // GPS的经纬度,海拔高度
             //printf("receive GPS with timestamp %f\n", GPS_msg->header.stamp.toSec());
             double latitude = GPS_msg->latitude;
             double longitude = GPS_msg->longitude;
             double altitude = GPS_msg->altitude;
             //int numSats = GPS_msg->status.service;
+            // GPS数据的方差
             double pos_accuracy = GPS_msg->position_covariance[0];
             if(pos_accuracy <= 0)
                 pos_accuracy = 1;
             //printf("receive covariance %lf \n", pos_accuracy);
             //if(GPS_msg->status.status > 8)
-                globalEstimator.inputGPS(t, latitude, longitude, altitude, pos_accuracy);
+            // 向global estimator输入GPS数据
+            globalEstimator.inputGPS(t, latitude, longitude, altitude, pos_accuracy);
             gpsQueue.pop();
             break;
         }
@@ -122,6 +136,7 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
     }
     m_buf.unlock();
 
+    // 获取global estimator优化后的全局位姿并发布全局里程计和路径
     Eigen::Vector3d global_t;
     Eigen:: Quaterniond global_q;
     globalEstimator.getGlobalOdom(global_t, global_q);
@@ -143,7 +158,7 @@ void vio_callback(const nav_msgs::Odometry::ConstPtr &pose_msg)
 
 
     // write result to file
-    std::ofstream foutC("/home/tony-ws1/output/vio_global.csv", ios::app);
+    std::ofstream foutC("/home/gurx/output/vio_global.csv", ios::app);
     foutC.setf(ios::fixed, ios::floatfield);
     foutC.precision(0);
     foutC << pose_msg->header.stamp.toSec() * 1e9 << ",";
@@ -165,9 +180,10 @@ int main(int argc, char **argv)
 
     global_path = &globalEstimator.global_path;
 
-    ros::Subscriber sub_GPS = n.subscribe("/gps", 100, GPS_callback);
-    ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 100, vio_callback);
-    pub_global_path = n.advertise<nav_msgs::Path>("global_path", 100);
+    // ros::Subscriber sub_GPS = n.subscribe("/gps", 100, GPS_callback);   // 订阅GPS话题
+    ros::Subscriber sub_GPS = n.subscribe("/imu/gnss", 100, GPS_callback);
+    ros::Subscriber sub_vio = n.subscribe("/vins_estimator/odometry", 100, vio_callback);   // 订阅VIO里程计话题
+    pub_global_path = n.advertise<nav_msgs::Path>("global_path", 100);  // 发布
     pub_global_odometry = n.advertise<nav_msgs::Odometry>("global_odometry", 100);
     pub_car = n.advertise<visualization_msgs::MarkerArray>("car_model", 1000);
     ros::spin();
